@@ -1,6 +1,8 @@
 services:
   nodeseek-bot:
-    build: .
+    build:
+      context: .
+      network: host   # 👈 这里加上
     container_name: nodeseek-bot
     restart: always
     env_file:

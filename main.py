@@ -54,9 +54,18 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = context.args[0]
         cookie = " ".join(context.args[1:]).strip()
 
+        # 查找是否已存在同名账号
+        for account in accounts:
+            if account["name"] == name:
+                account["cookie"] = cookie  # 更新cookie
+                save_accounts(accounts)
+                await update.message.reply_text(f"✅ 账号 {name} 已更新。\n正在为该账号签到，请稍候...")
+                asyncio.create_task(sign_in_and_report(update, context, name, cookie))
+                return
+
+        # 不存在才添加
         accounts.append({"name": name, "cookie": cookie})
         save_accounts(accounts)
-
         await update.message.reply_text(f"✅ 已添加账号: {name}\n正在为该账号签到，请稍候...")
 
         # 后台执行签到，避免阻塞
@@ -64,6 +73,40 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ 添加账号时出错: {e}")
+
+async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not accounts:
+        await update.message.reply_text("当前没有添加任何账号。")
+        return
+
+    lines = [f"当前已添加的账号 ({len(accounts)} 个)："]
+    for i, acc in enumerate(accounts, 1):
+        lines.append(f"{i}. {acc['name']}")
+    await update.message.reply_text("\n".join(lines))
+
+async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    allowed_user_id = 5427047633  # 允许使用该指令的用户ID，整数
+
+    user_id = update.effective_user.id
+    if user_id != allowed_user_id:
+        await update.message.reply_text("❌ 你无权限使用该指令。")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("❌ 格式错误，请使用: /delete <账号名称>")
+        return
+
+    name = context.args[0]
+    global accounts
+
+    for i, acc in enumerate(accounts):
+        if acc["name"] == name:
+            del accounts[i]
+            save_accounts(accounts)
+            await update.message.reply_text(f"✅ 已删除账号: {name}")
+            return
+
+    await update.message.reply_text(f"❌ 找不到名为 {name} 的账号。")
 
 async def sign_in_and_report(update, context, name, cookie):
     loop = asyncio.get_event_loop()
@@ -206,12 +249,17 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("last", last))
+    app.add_handler(CommandHandler("list", list_accounts))
+    app.add_handler(CommandHandler("delete", delete_account))
 
     commands = [
         BotCommand("start", "启动Bot"),
         BotCommand("add", "添加账号"),
         BotCommand("last", "查看最近签到记录"),
+        BotCommand("list", "查看所有账号"),
+        BotCommand("delete", "删除指定账号"),
     ]
+
 
     await app.bot.set_my_commands(commands)
 
@@ -239,6 +287,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
     app.add_handler(CommandHandler("last", last))
+    app.add_handler(CommandHandler("list", list_accounts))
+    app.add_handler(CommandHandler("delete", delete_account))
 
     async def on_startup(app):
         app.create_task(signin_loop(app))
