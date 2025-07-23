@@ -1,0 +1,5 @@
+python-telegram-bot==20.6
+cloudscraper==1.2.71
+pytz
+requests
+python-dotenv
