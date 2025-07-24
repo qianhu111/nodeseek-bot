@@ -13,6 +13,7 @@ import re # 用于正则表达式匹配签到收益
 
 # === 配置区域 ===
 ACCOUNTS_FILE = "data/accounts.json"  # 存储账号信息的文件路径
+SUBSCRIBERS_FILE = "data/subscribers.json"
 CHINA_TZ = pytz.timezone("Asia/Shanghai")  # 使用上海时区
 DEFAULT_MODE = (os.getenv("DEFAULT", "false").lower() == "true")  # 签到模式
 ADMIN_USER_ID = int(os.getenv("TG_ADMIN_ID", "0"))  # 管理员TG ID
@@ -38,7 +39,6 @@ def load_accounts():
             return json.load(f)
     return []
 
-
 def save_accounts(accounts):
     """
     保存账号列表到文件
@@ -48,6 +48,24 @@ def save_accounts(accounts):
         json.dump(accounts, f, ensure_ascii=False, indent=2)
 
 accounts = load_accounts()
+
+def load_subscribers():
+    if os.path.exists(SUBSCRIBERS_FILE):
+        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+def save_subscribers(subscribers):
+    os.makedirs(os.path.dirname(SUBSCRIBERS_FILE), exist_ok=True)
+    with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(subscribers, f, ensure_ascii=False, indent=2)
+
+subscribers = load_subscribers()
+
+def add_subscriber(user_id: int):
+    if user_id not in subscribers:
+        subscribers.append(user_id)
+        save_subscribers(subscribers)
 
 def parse_cookie(cookie_str):
     """
@@ -69,24 +87,53 @@ def create_scraper():
         browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
     )
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+async def push(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 你无权限使用该指令。")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ 格式错误，请使用: `/push <消息内容>`", parse_mode="Markdown")
+        return
+
+    message = " ".join(context.args)
+    success_count = 0
+    fail_count = 0
+
+    for sub_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=sub_id, text=message, parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.1)  # 防止请求过快
+        except Exception as e:
+            print(f"推送消息失败给用户 {sub_id}: {e}")
+            fail_count += 1
+
+    await update.message.reply_text(f"✅ 推送完成，成功: {success_count}，失败: {fail_count}")
 
 # === 机器人指令 ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /start 指令：欢迎信息和指令列表
-    """
+    user_id = update.effective_user.id
+    add_subscriber(user_id)
+
     await update.message.reply_text(
         "🤖 *欢迎使用 NodeSeek 签到 Bot！*\n\n"
         "📌 *指令说明:*\n"
         "➕ `/add <账号名称> <cookie>` 添加新账号\n"
         "📋 `/list` 查看所有账号\n"
         "📅 `/last` 查看最近签到记录\n"
-        "🔍 `/check` 查询所有账号签到状态，或 `/check <账号名称>` 查询单个账号\n" # 更新了说明
+        "🔍 `/check <账号名称>` 查询账号状态\n"
         "⚡ `/force` 立即签到（仅管理员）\n"
         "🔄 `/retry <账号名称>` 手动补签该账号\n"
-        "🗑 `/delete <账号名称>` 删除账号",
+        "🗑 `/delete <账号名称>` 删除账号（仅管理员）\n"
+        "🛎️ `/help` 帮助信息",
         parse_mode="Markdown"
     )
+
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,6 +245,8 @@ async def check_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /check 或 /check <账号名称>：查询所有账号签到状态或指定账号签到状态。
     此函数现在将调用 api/attendance，并从其响应中判断是否已签到。
     """
+    user_id = update.effective_user.id # 获取当前用户的ID
+
     if not accounts:
         await update.message.reply_text("⚠️ 当前没有任何账号，请先添加。")
         return
@@ -207,7 +256,7 @@ async def check_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 判断是查询单个账号还是所有账号
     if context.args:
-        # 查询单个账号
+        # 查询单个账号：所有人可用，无需权限检查
         account_name_to_check = context.args[0]
         found_account = None
         for acc in accounts:
@@ -223,7 +272,11 @@ async def check_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines.append(f"❌ 找不到名为 `{account_name_to_check}` 的账号。")
     else:
-        # 查询所有账号
+        # 查询所有账号：仅管理员可用
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ 你无权限使用该指令查询所有账号状态。请使用 `/check <账号名称>` 查询指定账号。", parse_mode="Markdown")
+            return
+        
         for acc in accounts:
             name = acc['name']
             cookie_dict = parse_cookie(acc['cookie'])
@@ -438,9 +491,9 @@ def sign_in_single_account_with_retry(account_name, cookie, max_retry=3):
     return f"❌ 账号 `{account_name}` 签到失败，重试{max_retry}次后终止"
 
 
-def sign_in_all_accounts():
+async def sign_in_all_accounts_async():
     """
-    批量签到所有账号
+    异步批量签到所有账号
     """
     global last_signin_result, last_signin_time
     if not accounts:
@@ -451,8 +504,9 @@ def sign_in_all_accounts():
     for acc in accounts:
         delay_sec = random.randint(3, 6)
         print(f"⏳ {acc['name']} 延迟 {delay_sec}s 后签到...")
-        time.sleep(delay_sec)
-        result = sign_in_single_account_with_retry(acc['name'], acc['cookie'])
+        await asyncio.sleep(delay_sec)
+        # 运行单账号签到的同步函数，转为线程执行
+        result = await asyncio.to_thread(sign_in_single_account_with_retry, acc['name'], acc['cookie'])
         summary.append(result)
 
     last_signin_time = get_now()
@@ -460,33 +514,26 @@ def sign_in_all_accounts():
     send_tg_notification(f"📋 *NodeSeek 签到完成*\n\n{last_signin_result}")
 
 
+
 def send_tg_notification(message):
-    """
-    推送签到通知到Telegram
-    """
     TELEGRAM_TOKEN = os.getenv("TG_BOT_TOKEN")
-    TELEGRAM_CHAT_ID = os.getenv("TG_USER_ID")
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN:
         print("⚠️ Telegram配置缺失，无法推送通知。")
         return
 
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        params = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-        response = requests.post(url, json=params, timeout=10)
-        if response.status_code == 200:
-            print("✅ Telegram通知已发送")
-        else:
-            print(f"❌ Telegram推送失败: {response.status_code} {response.text}")
-    except Exception as e:
-        print(f"❌ Telegram推送异常: {e}")
+    import telegram
+    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+
+    for user_id in subscribers:
+        try:
+            bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"❌ 向用户 {user_id} 推送失败: {e}")
 
 
 # === 定时循环任务 ===
 async def signin_loop(app):
-    """
-    定时任务：每天随机时间批量签到
-    """
     while True:
         now = get_now()
         next_hour = random.randint(7, 8)
@@ -498,34 +545,13 @@ async def signin_loop(app):
         wait_sec = (next_run - now).total_seconds()
         print(f"⏰ 距离下次签到还有 {int(wait_sec//3600)}小时 {int((wait_sec%3600)//60)}分")
         await asyncio.sleep(wait_sec)
-        await asyncio.to_thread(sign_in_all_accounts)
+        await sign_in_all_accounts_async()
 
 
-# === 入口启动 ===
-async def main():
-    """启动 Bot 应用"""
-    global accounts
-    accounts = load_accounts()
 
-    TELEGRAM_TOKEN = os.getenv('TG_BOT_TOKEN')
-    if not TELEGRAM_TOKEN:
-        raise RuntimeError("环境变量 TG_BOT_TOKEN 未设置")
-
-    # 构建 Bot 应用
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    # 注册指令
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("list", list_accounts))
-    app.add_handler(CommandHandler("delete", delete_account))
-    app.add_handler(CommandHandler("last", last))
-    app.add_handler(CommandHandler("check", check_accounts))
-    app.add_handler(CommandHandler("force", force_signin))
-    app.add_handler(CommandHandler("retry", retry_account))
-
-    # 设置菜单命令
-    commands = [
+# === 启动时任务 ===
+async def on_startup(app):
+    await app.bot.set_my_commands([
         BotCommand("start", "启动Bot"),
         BotCommand("add", "添加账号"),
         BotCommand("list", "查看所有账号"),
@@ -533,22 +559,13 @@ async def main():
         BotCommand("check", "查询签到状态"),
         BotCommand("force", "立即签到（管理员）"),
         BotCommand("retry", "补签指定账号"),
-        BotCommand("delete", "删除账号"),
-    ]
-    await app.bot.set_my_commands(commands)
+        BotCommand("delete", "删除账号（管理员）"),
+        BotCommand("push", "广播消息（管理员）"),
+        BotCommand("help", "帮助信息"),
+    ])
+    app.create_task(signin_loop(app))
 
-    print("✅ Telegram Bot 启动成功，监听命令中...")
-
-    # 注册一个应用启动后的回调，在里面创建后台任务
-    async def on_startup(app):
-        app.create_task(signin_loop(app))
-
-    app.post_init = on_startup
-
-    # 同步运行，无需 asyncio.run()
-    await app.run_polling()
-
-
+# === 入口启动 ===
 if __name__ == "__main__":
     # 🚨 不要使用 asyncio.run()，直接同步 run_polling
     TELEGRAM_TOKEN = os.getenv('TG_BOT_TOKEN')
@@ -564,9 +581,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("check", check_accounts))
     app.add_handler(CommandHandler("force", force_signin))
     app.add_handler(CommandHandler("retry", retry_account))
-
-    async def on_startup(app):
-        app.create_task(signin_loop(app))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("push", push))
 
     app.post_init = on_startup
 
