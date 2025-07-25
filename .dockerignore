@@ -5,6 +5,7 @@
 !Dockerfile
 !main.py
 !requirements.txt
+!docker-compose.yml
 
 # 忽略常见的不必要文件和目录
 .git
