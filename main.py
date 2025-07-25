@@ -78,7 +78,6 @@ def parse_cookie(cookie_str):
             cookie_dict[k.strip()] = v.strip()
     return cookie_dict
 
-
 def create_scraper():
     """
     创建cloudscraper实例，用于带浏览器伪装的请求
@@ -87,256 +86,7 @@ def create_scraper():
         browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
-
-async def push(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 你无权限使用该指令。")
-        return
-
-    if not context.args:
-        await update.message.reply_text("❌ 格式错误，请使用: `/push <消息内容>`", parse_mode="Markdown")
-        return
-
-    message = " ".join(context.args)
-    success_count = 0
-    fail_count = 0
-
-    for sub_id in subscribers:
-        try:
-            await context.bot.send_message(chat_id=sub_id, text=message, parse_mode="Markdown")
-            success_count += 1
-            await asyncio.sleep(0.1)  # 防止请求过快
-        except Exception as e:
-            print(f"推送消息失败给用户 {sub_id}: {e}")
-            fail_count += 1
-
-    await update.message.reply_text(f"✅ 推送完成，成功: {success_count}，失败: {fail_count}")
-
-# === 机器人指令 ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    add_subscriber(user_id)
-
-    await update.message.reply_text(
-        "🤖 *欢迎使用 NodeSeek 签到 Bot！*\n\n"
-        "📌 *指令说明:*\n"
-        "➕ `/add <账号名称> <cookie>` 添加新账号\n"
-        "📋 `/list` 查看所有账号\n"
-        "📅 `/last` 查看最近签到记录\n"
-        "🔍 `/check <账号名称>` 查询账号状态\n"
-        "⚡ `/force` 立即签到（仅管理员）\n"
-        "🔄 `/retry <账号名称>` 手动补签该账号\n"
-        "🗑 `/delete <账号名称>` 删除账号（仅管理员）\n"
-        "🛎️ `/help` 帮助信息",
-        parse_mode="Markdown"
-    )
-
-
-
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /add <账号名称> <cookie>：添加或更新账号，后台启动签到
-    """
-    try:
-        if len(context.args) < 2:
-            await update.message.reply_text("❌ 格式错误，请使用: `/add <账号名称> <cookie>`", parse_mode="Markdown")
-            return
-
-        name = context.args[0]
-        cookie = " ".join(context.args[1:]).strip()
-
-        found = False
-        for account in accounts:
-            if account["name"] == name:
-                account["cookie"] = cookie
-                save_accounts(accounts)
-                found = True
-                await update.message.reply_text(
-                    f"✅ *账号 {name} 已更新*\n正在为该账号签到，请稍候...",
-                    parse_mode="Markdown"
-                )
-                asyncio.create_task(sign_in_and_report(update, context, name, cookie))
-                break
-
-        if not found:
-            accounts.append({"name": name, "cookie": cookie})
-            save_accounts(accounts)
-            await update.message.reply_text(
-                f"✅ *已添加账号:* `{name}`\n正在为该账号签到，请稍候...",
-                parse_mode="Markdown"
-            )
-            asyncio.create_task(sign_in_and_report(update, context, name, cookie))
-
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ 添加账号时出错: `{e}`", parse_mode="Markdown")
-
-# 辅助函数，用于在add命令后立即执行签到并报告结果
-async def sign_in_and_report(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str, cookie: str):
-    """
-    在add命令后立即为单个账号签到并向用户报告结果。
-    """
-    print(f"正在为账号 {name} 执行初次签到...")
-    # 这里直接调用 sign_in_single_account_with_retry，它现在会直接尝试签到
-    result_message = await asyncio.to_thread(sign_in_single_account_with_retry, name, cookie)
-    await update.message.reply_text(result_message, parse_mode="Markdown")
-    print(f"账号 {name} 初次签到完成，结果已报告。")
-
-
-async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /list：查看所有添加的账号
-    """
-    if not accounts:
-        await update.message.reply_text("⚠️ 当前没有添加任何账号。")
-        return
-
-    lines = [f"📋 *已添加账号* ({len(accounts)} 个):"]
-    for i, acc in enumerate(accounts, 1):
-        lines.append(f"{i}. `{acc['name']}`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /delete <账号名称>：删除指定账号，仅管理员可用
-    """
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 你无权限使用该指令。")
-        return
-
-    if len(context.args) < 1:
-        await update.message.reply_text("❌ 格式错误，请使用: `/delete <账号名称>`", parse_mode="Markdown")
-        return
-
-    name = context.args[0]
-    global accounts
-
-    for i, acc in enumerate(accounts):
-        if acc["name"] == name:
-            del accounts[i]
-            save_accounts(accounts)
-            await update.message.reply_text(f"✅ 已删除账号: `{name}`", parse_mode="Markdown")
-            return
-
-    await update.message.reply_text(f"❌ 找不到名为 `{name}` 的账号。", parse_mode="Markdown")
-
-
-async def last(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /last：查看最近签到记录
-    """
-    global last_signin_result, last_signin_time
-    if last_signin_result:
-        reply = (
-            f"📅 *最近签到时间:*\n`{last_signin_time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-            f"{last_signin_result}"
-        )
-        await send_long_message(update.effective_chat.id, reply, context)
-    else:
-        await update.message.reply_text("⚠️ 还没有执行过签到。")
-
-
-async def check_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /check 或 /check <账号名称>：查询所有账号签到状态或指定账号签到状态。
-    此函数现在将调用 api/attendance，并从其响应中判断是否已签到。
-    """
-    user_id = update.effective_user.id # 获取当前用户的ID
-
-    if not accounts:
-        await update.message.reply_text("⚠️ 当前没有任何账号，请先添加。")
-        return
-
-    lines = ["🔍 *账号签到状态:*"]
-    scraper = create_scraper() 
-
-    # 判断是查询单个账号还是所有账号
-    if context.args:
-        # 查询单个账号：所有人可用，无需权限检查
-        account_name_to_check = context.args[0]
-        found_account = None
-        for acc in accounts:
-            if acc['name'] == account_name_to_check:
-                found_account = acc
-                break
-        
-        if found_account:
-            name = found_account['name']
-            cookie_dict = parse_cookie(found_account['cookie'])
-            status_message = await asyncio.to_thread(check_signin_status, scraper, name, cookie_dict)
-            lines.append(status_message)
-        else:
-            lines.append(f"❌ 找不到名为 `{account_name_to_check}` 的账号。")
-    else:
-        # 查询所有账号：仅管理员可用
-        if user_id != ADMIN_USER_ID:
-            await update.message.reply_text("❌ 你无权限使用该指令查询所有账号状态。请使用 `/check <账号名称>` 查询指定账号。", parse_mode="Markdown")
-            return
-        
-        for acc in accounts:
-            name = acc['name']
-            cookie_dict = parse_cookie(acc['cookie'])
-            status_message = await asyncio.to_thread(check_signin_status, scraper, name, cookie_dict)
-            lines.append(status_message)
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def force_signin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /force：立即签到所有账号，仅管理员可用
-    """
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 你无权限使用该指令。")
-        return
-
-    await update.message.reply_text("⚡ 开始立即签到，请稍候...")
-    try:
-        await asyncio.to_thread(sign_in_all_accounts)
-        await update.message.reply_text("✅ 所有账号已完成签到")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ 签到失败: `{e}`", parse_mode="Markdown")
-
-
-async def retry_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /retry <账号名称>：手动补签指定账号
-    """
-    if len(context.args) < 1:
-        await update.message.reply_text("❌ 格式错误，请使用: `/retry <账号名称>`", parse_mode="Markdown")
-        return
-
-    name = context.args[0]
-    account = None
-    for acc in accounts:
-        if acc["name"] == name:
-            account = acc
-            break
-
-    if not account:
-        await update.message.reply_text(f"❌ 找不到名为 `{name}` 的账号。", parse_mode="Markdown")
-        return
-
-    await update.message.reply_text(f"🔄 开始为账号 `{name}` 补签，请稍候...", parse_mode="Markdown")
-    # 直接调用带重试的签到函数
-    result = await asyncio.to_thread(sign_in_single_account_with_retry, name, account["cookie"])
-    await update.message.reply_text(result, parse_mode="Markdown")
-
-
 # === 核心签到逻辑 ===
-async def send_long_message(chat_id, text, context):
-    """
-    发送超长消息分段
-    """
-    MAX_LEN = 4000
-    for i in range(0, len(text), MAX_LEN):
-        await context.bot.send_message(chat_id=chat_id, text=text[i:i+MAX_LEN], parse_mode="Markdown")
-
 
 def check_signin_status(scraper, account_name, cookie_dict):
     """
@@ -391,7 +141,6 @@ def check_signin_status(scraper, account_name, cookie_dict):
         return f"❌ `{account_name}` 状态检查响应解析失败。"
     except Exception as e:
         return f"❌ `{account_name}` 状态检查发生未知错误: {e}"
-
 
 def sign_in_single_account(account_name, cookie):
     """
@@ -476,7 +225,6 @@ def sign_in_single_account(account_name, cookie):
         print(msg)
         return msg
 
-
 def sign_in_single_account_with_retry(account_name, cookie, max_retry=3):
     """
     单账号签到（带重试）
@@ -489,7 +237,6 @@ def sign_in_single_account_with_retry(account_name, cookie, max_retry=3):
         print(f"⚠️ 第 {attempt} 次尝试失败，等待重试...")
         time.sleep(random.randint(2, 5))
     return f"❌ 账号 `{account_name}` 签到失败，重试{max_retry}次后终止"
-
 
 async def sign_in_all_accounts_async():
     """
@@ -511,28 +258,282 @@ async def sign_in_all_accounts_async():
 
     last_signin_time = get_now()
     last_signin_result = "\n".join(summary)
-    send_tg_notification(f"📋 *NodeSeek 签到完成*\n\n{last_signin_result}")
+    await send_tg_notification_async(f"📋 *NodeSeek 签到完成*\n\n{last_signin_result}")
 
+# === Telegram Bot 命令函数 ===
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    add_subscriber(user_id)
 
-def send_tg_notification(message):
+    await update.message.reply_text(
+        "🤖 *欢迎使用 NodeSeek 签到 Bot！*\n\n"
+        "📌 *指令说明:*\n"
+        "➕ `/add <账号名称> <cookie>` 添加新账号\n"
+        "📋 `/list` 查看所有账号\n"
+        "📅 `/last` 查看最近签到记录\n"
+        "🔍 `/check <账号名称>` 查询账号状态\n"
+        "⚡ `/force` 立即签到（仅管理员）\n"
+        "🔄 `/retry <账号名称>` 手动补签该账号\n"
+        "🗑 `/delete <账号名称>` 删除账号（仅管理员）\n"
+        "🛎️ `/help` 帮助信息",
+        parse_mode="Markdown"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /add <账号名称> <cookie>：添加或更新账号，后台启动签到
+    """
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text("❌ 格式错误，请使用: `/add <账号名称> <cookie>`", parse_mode="Markdown")
+            return
+
+        name = context.args[0]
+        cookie = " ".join(context.args[1:]).strip()
+
+        found = False
+        for account in accounts:
+            if account["name"] == name:
+                account["cookie"] = cookie
+                save_accounts(accounts)
+                found = True
+                await update.message.reply_text(
+                    f"✅ *账号 {name} 已更新*\n正在为该账号签到，请稍候...",
+                    parse_mode="Markdown"
+                )
+                asyncio.create_task(sign_in_and_report(update, context, name, cookie))
+                break
+
+        if not found:
+            accounts.append({"name": name, "cookie": cookie})
+            save_accounts(accounts)
+            await update.message.reply_text(
+                f"✅ *已添加账号:* `{name}`\n正在为该账号签到，请稍候...",
+                parse_mode="Markdown"
+            )
+            asyncio.create_task(sign_in_and_report(update, context, name, cookie))
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ 添加账号时出错: `{e}`", parse_mode="Markdown")
+
+# 辅助函数，用于在add命令后立即执行签到并报告结果
+async def sign_in_and_report(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str, cookie: str):
+    """
+    在add命令后立即为单个账号签到并向用户报告结果。
+    """
+    print(f"正在为账号 {name} 执行初次签到...")
+    # 这里直接调用 sign_in_single_account_with_retry，它现在会直接尝试签到
+    result_message = await asyncio.to_thread(sign_in_single_account_with_retry, name, cookie)
+    await update.message.reply_text(result_message, parse_mode="Markdown")
+    print(f"账号 {name} 初次签到完成，结果已报告。")
+
+async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /list：查看所有添加的账号
+    """
+    if not accounts:
+        await update.message.reply_text("⚠️ 当前没有添加任何账号。")
+        return
+
+    lines = [f"📋 *已添加账号* ({len(accounts)} 个):"]
+    for i, acc in enumerate(accounts, 1):
+        lines.append(f"{i}. `{acc['name']}`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /last：查看最近签到记录
+    """
+    global last_signin_result, last_signin_time
+    if last_signin_result:
+        reply = (
+            f"📅 *最近签到时间:*\n`{last_signin_time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+            f"{last_signin_result}"
+        )
+        await send_long_message(update.effective_chat.id, reply, context)
+    else:
+        await update.message.reply_text("⚠️ 还没有执行过签到。")
+
+async def check_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /check 或 /check <账号名称>：查询所有账号签到状态或指定账号签到状态。
+    此函数现在将调用 api/attendance，并从其响应中判断是否已签到。
+    """
+    user_id = update.effective_user.id # 获取当前用户的ID
+
+    if not accounts:
+        await update.message.reply_text("⚠️ 当前没有任何账号，请先添加。")
+        return
+
+    lines = ["🔍 *账号签到状态:*"]
+    scraper = create_scraper() 
+
+    # 判断是查询单个账号还是所有账号
+    if context.args:
+        # 查询单个账号：所有人可用，无需权限检查
+        account_name_to_check = context.args[0]
+        found_account = None
+        for acc in accounts:
+            if acc['name'] == account_name_to_check:
+                found_account = acc
+                break
+        
+        if found_account:
+            name = found_account['name']
+            cookie_dict = parse_cookie(found_account['cookie'])
+            status_message = await asyncio.to_thread(check_signin_status, scraper, name, cookie_dict)
+            lines.append(status_message)
+        else:
+            lines.append(f"❌ 找不到名为 `{account_name_to_check}` 的账号。")
+    else:
+        # 查询所有账号：仅管理员可用
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ 你无权限使用该指令查询所有账号状态。请使用 `/check <账号名称>` 查询指定账号。", parse_mode="Markdown")
+            return
+        
+        for acc in accounts:
+            name = acc['name']
+            cookie_dict = parse_cookie(acc['cookie'])
+            status_message = await asyncio.to_thread(check_signin_status, scraper, name, cookie_dict)
+            lines.append(status_message)
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def force_signin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /force：立即签到所有账号，仅管理员可用
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 你无权限使用该指令。")
+        return
+
+    await update.message.reply_text("⚡ 开始立即签到，请稍候...")
+    try:
+        await asyncio.to_thread(sign_in_all_accounts)
+        await update.message.reply_text("✅ 所有账号已完成签到")
+
+        # ✅ 推送给所有订阅者
+        subscribers = load_subscribers()
+        for uid in subscribers:
+            try:
+                await context.bot.send_message(chat_id=uid, text="✅ 签到成功！可以去看看收益了～")
+            except Exception as e:
+                print(f"❌ 无法向用户 {uid} 推送消息: {e}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ 签到失败: `{e}`", parse_mode="Markdown")
+
+async def retry_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /retry <账号名称>：手动补签指定账号
+    """
+    if len(context.args) < 1:
+        await update.message.reply_text("❌ 格式错误，请使用: `/retry <账号名称>`", parse_mode="Markdown")
+        return
+
+    name = context.args[0]
+    account = None
+    for acc in accounts:
+        if acc["name"] == name:
+            account = acc
+            break
+
+    if not account:
+        await update.message.reply_text(f"❌ 找不到名为 `{name}` 的账号。", parse_mode="Markdown")
+        return
+
+    await update.message.reply_text(f"🔄 开始为账号 `{name}` 补签，请稍候...", parse_mode="Markdown")
+    # 直接调用带重试的签到函数
+    result = await asyncio.to_thread(sign_in_single_account_with_retry, name, account["cookie"])
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /delete <账号名称>：删除指定账号，仅管理员可用
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 你无权限使用该指令。")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("❌ 格式错误，请使用: `/delete <账号名称>`", parse_mode="Markdown")
+        return
+
+    name = context.args[0]
+    global accounts
+
+    for i, acc in enumerate(accounts):
+        if acc["name"] == name:
+            del accounts[i]
+            save_accounts(accounts)
+            await update.message.reply_text(f"✅ 已删除账号: `{name}`", parse_mode="Markdown")
+            return
+
+    await update.message.reply_text(f"❌ 找不到名为 `{name}` 的账号。", parse_mode="Markdown")
+
+async def push(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /push <消息内容>：向所有用户广播消息通知
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 你无权限使用该指令。")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ 格式错误，请使用: `/push <消息内容>`", parse_mode="Markdown")
+        return
+
+    message = " ".join(context.args)
+    success_count = 0
+    fail_count = 0
+
+    for sub_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=sub_id, text=message, parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.1)  # 防止请求过快
+        except Exception as e:
+            print(f"推送消息失败给用户 {sub_id}: {e}")
+            fail_count += 1
+
+    await update.message.reply_text(f"✅ 推送完成，成功: {success_count}，失败: {fail_count}")
+
+# === Telegram 推送设置 ===
+
+async def send_long_message(chat_id, text, context):
+    """
+    发送超长消息分段
+    """
+    MAX_LEN = 4000
+    for i in range(0, len(text), MAX_LEN):
+        await context.bot.send_message(chat_id=chat_id, text=text[i:i+MAX_LEN], parse_mode="Markdown")
+
+async def send_tg_notification_async(message):
     TELEGRAM_TOKEN = os.getenv("TG_BOT_TOKEN")
     if not TELEGRAM_TOKEN:
         print("⚠️ Telegram配置缺失，无法推送通知。")
         return
 
-    import telegram
-    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    from telegram import Bot
+    from telegram.error import TelegramError
+
+    bot = Bot(token=TELEGRAM_TOKEN)
 
     for user_id in subscribers:
         try:
-            bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
-            time.sleep(0.1)
-        except Exception as e:
+            await bot.send_message(chat_id=user_id, text=message, parse_mode="Markdown")
+            await asyncio.sleep(0.1)
+        except TelegramError as e:
             print(f"❌ 向用户 {user_id} 推送失败: {e}")
 
-
 # === 定时循环任务 ===
+
 async def signin_loop(app):
     while True:
         now = get_now()
@@ -547,9 +548,8 @@ async def signin_loop(app):
         await asyncio.sleep(wait_sec)
         await sign_in_all_accounts_async()
 
-
-
 # === 启动时任务 ===
+
 async def on_startup(app):
     await app.bot.set_my_commands([
         BotCommand("start", "启动Bot"),
@@ -566,6 +566,7 @@ async def on_startup(app):
     app.create_task(signin_loop(app))
 
 # === 入口启动 ===
+
 if __name__ == "__main__":
     # 🚨 不要使用 asyncio.run()，直接同步 run_polling
     TELEGRAM_TOKEN = os.getenv('TG_BOT_TOKEN')
