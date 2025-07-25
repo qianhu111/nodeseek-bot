@@ -8,7 +8,7 @@ import pytz
 import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import re # 用于正则表达式匹配签到收益
 
 # === 配置区域 ===
@@ -21,6 +21,7 @@ ADMIN_USER_ID = int(os.getenv("TG_ADMIN_ID", "0"))  # 管理员TG ID
 # === 全局变量 ===
 last_signin_result = ""  # 最近签到结果缓存
 last_signin_time = None  # 最近签到时间缓存
+pending_push = set()  # 记录等待输入推送内容的用户 ID 集合
 
 # === 工具函数 ===
 def get_now():
@@ -225,19 +226,6 @@ def sign_in_single_account(account_name, cookie):
         print(msg)
         return msg
 
-def sign_in_single_account_with_retry(account_name, cookie, max_retry=3):
-    """
-    单账号签到（带重试）
-    """
-    for attempt in range(1, max_retry + 1):
-        result = sign_in_single_account(account_name, cookie)
-        # 根据返回结果判断是否停止重试
-        if "✅ 账号" in result or "⚠️ 账号" in result or "Cookie已失效" in result:
-            return result
-        print(f"⚠️ 第 {attempt} 次尝试失败，等待重试...")
-        time.sleep(random.randint(2, 5))
-    return f"❌ 账号 `{account_name}` 签到失败，重试{max_retry}次后终止"
-
 async def sign_in_all_accounts_async():
     """
     异步批量签到所有账号
@@ -253,7 +241,7 @@ async def sign_in_all_accounts_async():
         print(f"⏳ {acc['name']} 延迟 {delay_sec}s 后签到...")
         await asyncio.sleep(delay_sec)
         # 运行单账号签到的同步函数，转为线程执行
-        result = await asyncio.to_thread(sign_in_single_account_with_retry, acc['name'], acc['cookie'])
+        result = await asyncio.to_thread(sign_in_single_account, acc['name'], acc['cookie'])
         summary.append(result)
 
     last_signin_time = get_now()
@@ -327,7 +315,7 @@ async def sign_in_and_report(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """
     print(f"正在为账号 {name} 执行初次签到...")
     # 这里直接调用 sign_in_single_account_with_retry，它现在会直接尝试签到
-    result_message = await asyncio.to_thread(sign_in_single_account_with_retry, name, cookie)
+    result_message = await asyncio.to_thread(sign_in_single_account, name, cookie)
     await update.message.reply_text(result_message, parse_mode="Markdown")
     print(f"账号 {name} 初次签到完成，结果已报告。")
 
@@ -448,7 +436,7 @@ async def retry_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"🔄 开始为账号 `{name}` 补签，请稍候...", parse_mode="Markdown")
     # 直接调用带重试的签到函数
-    result = await asyncio.to_thread(sign_in_single_account_with_retry, name, account["cookie"])
+    result = await asyncio.to_thread(sign_in_single_account, name, account["cookie"])
     await update.message.reply_text(result, parse_mode="Markdown")
 
 async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -478,18 +466,26 @@ async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def push(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /push <消息内容>：向所有用户广播消息通知
+    /push：触发广播模式，等待用户输入内容后群发
     """
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 你无权限使用该指令。")
         return
 
-    if not context.args:
-        await update.message.reply_text("❌ 格式错误，请使用: `/push <消息内容>`", parse_mode="Markdown")
-        return
+    chat_id = update.effective_chat.id
+    pending_push.add(chat_id)
+    await update.message.reply_text("📝 请发送你要推送的消息内容（支持多行）。")
 
-    message = " ".join(context.args)
+async def handle_pending_push_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if chat_id not in pending_push or user_id != ADMIN_USER_ID:
+        return  # 不是在等待状态或不是管理员，忽略
+
+    pending_push.remove(chat_id)  # 清除等待状态
+    message = update.message.text.strip()
     success_count = 0
     fail_count = 0
 
@@ -497,7 +493,7 @@ async def push(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=sub_id, text=message, parse_mode="Markdown")
             success_count += 1
-            await asyncio.sleep(0.1)  # 防止请求过快
+            await asyncio.sleep(0.1)
         except Exception as e:
             print(f"推送消息失败给用户 {sub_id}: {e}")
             fail_count += 1
@@ -584,6 +580,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("retry", retry_account))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("push", push))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_pending_push_message))
 
     app.post_init = on_startup
 
