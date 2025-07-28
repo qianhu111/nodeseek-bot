@@ -3,3 +3,4 @@ cloudscraper==1.2.71
 pytz
 requests
 python-dotenv
+python-dateutil
